@@ -1,7 +1,7 @@
-displayName: Traefik Get Real IP
+displayName: Traefik Get Real IP from CloudfLare
 type: middleware
 
-import: github.com/Paxxs/traefik-get-real-ip
+import: github.com/BlackDark/traefik-cf-real-ip
 
 summary: When traefik is deployed behind multiple load balancers, use this plugin to detect the different load balancers and get the real IP from different header fields
 
