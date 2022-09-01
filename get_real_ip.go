@@ -1,96 +1,98 @@
-package traefik_get_real_ip
+package traefik_cf_real_ip
 
 import (
 	"context"
-	"fmt"
+    "fmt"
+    "net/netip"
 	"net"
 	"net/http"
-	"strings"
 )
-
-const (
-	xRealIP       = "X-Real-Ip"
-	xForwardedFor = "X-Forwarded-For"
-)
-
-// Proxy 配置文件中的数组结构
-type Proxy struct {
-	ProxyHeadername  string `yaml:"proxyHeadername"`
-	ProxyHeadervalue string `yaml:"proxyHeadervalue"`
-	RealIP           string `yaml:"realIP"`
-	OverwriteXFF     bool   `yaml:"overwriteXFF"` // override X-Forwarded-For
-}
 
 // Config the plugin configuration.
 type Config struct {
-	Proxy []Proxy `yaml:"proxy"`
+	CloudFlareIPs []string `yaml:"cloudFlareIps"`
+	CloudFlareHeader string `yaml:"cloudFlareHeader"`
+	DestinationHeader string `yaml:"destHeader"`
+	PrependIP bool `yaml:"prependIp"`
 }
 
 // CreateConfig creates the default plugin configuration.
 func CreateConfig() *Config {
-	return &Config{}
+	return &Config{
+		// https://www.cloudflare.com/ips-v4
+		CloudFlareIPs: []string{"173.245.48.0/20","103.21.244.0/22","103.22.200.0/22","103.31.4.0/22","141.101.64.0/18","108.162.192.0/18","190.93.240.0/20","188.114.96.0/20","197.234.240.0/22","198.41.128.0/17","162.158.0.0/15","104.16.0.0/13","104.24.0.0/14","172.64.0.0/13","131.0.72.0/22"},
+		CloudFlareHeader: "CF-Connecting-IP",
+		DestinationHeader: "X-Forwarded-For",
+		PrependIP: false,
+	}
 }
 
 // GetRealIP Define plugin
 type GetRealIP struct {
 	next  http.Handler
 	name  string
-	proxy []Proxy
-}
+	parsedPrefxies     []netip.Prefix
+	cfHeader string
+	destinationHeader string
+	prependIp bool
+}    
+
 
 // New creates and returns a new realip plugin instance.
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-	fmt.Printf("☃️ All Config：'%v',Proxy Settings len: '%d'\n", config, len(config.Proxy))
+	parsedPrefixes := []netip.Prefix{}
+
+	for _, element := range config.CloudFlareIPs {
+		network, err := netip.ParsePrefix(element)
+		if err != nil {
+			panic(err)
+		}
+		parsedPrefixes = append(parsedPrefixes, network)
+	}
+
+	fmt.Printf("CF RealIP Plugin Config: Config：'%v'\n", config)
 
 	return &GetRealIP{
 		next:  next,
 		name:  name,
-		proxy: config.Proxy,
+		parsedPrefxies: parsedPrefixes,
+		cfHeader: config.CloudFlareHeader,
+		destinationHeader: config.DestinationHeader,
+		prependIp: config.PrependIP,
 	}, nil
 }
 
-// 真正干事情了
 func (g *GetRealIP) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// fmt.Println("☃️当前配置：", g.proxy, "remoteaddr", req.RemoteAddr)
-	var realIP string
-	for _, proxy := range g.proxy {
-		if req.Header.Get(proxy.ProxyHeadername) == "*" || (req.Header.Get(proxy.ProxyHeadername) == proxy.ProxyHeadervalue) {
-			fmt.Printf("🐸 Current Proxy：%s\n", proxy.ProxyHeadervalue)
-			// CDN来源确定
-			nIP := req.Header.Get(proxy.RealIP)
-			if proxy.RealIP == "RemoteAddr" {
-				nIP, _, _ = net.SplitHostPort(req.RemoteAddr)
+	fmt.Println("remoteaddr", req.RemoteAddr)
+	fmt.Println("Header: ", g.cfHeader)
+	
+	ip, err := netip.ParseAddr(req.RemoteAddr)
+
+    if err != nil {
+        fmt.Println(err)
+		g.next.ServeHTTP(rw, req)
+		return
+    }
+
+	for _, element := range g.parsedPrefxies {
+		if element.Contains(ip) {
+			val := req.Header.Get(g.cfHeader)
+
+			if val == "" {
+				fmt.Println("Cloudlfare header not present")
+				g.next.ServeHTTP(rw, req)
+				return
 			}
-			forwardedIPs := strings.Split(nIP, ",")
-			// 从头部获取到IP并分割（主要担心xff有多个IP）
-			// 只有单个IP也只会返回单个IP slice
-			fmt.Printf("👀 IPs: '%d' detail:'%v'\n", len(forwardedIPs), forwardedIPs)
-			// 如果有多个，得到第一个 IP
-			for i := 0; i <= len(forwardedIPs)-1; i++ {
-				trimmedIP := strings.TrimSpace(forwardedIPs[i])
-				excluded := g.excludedIP(trimmedIP)
-				fmt.Printf("exluded:%t， currentIP:%s, index:%d\n", excluded, trimmedIP, i)
-				if !excluded {
-					realIP = trimmedIP
-					break
-				}
+
+			if g.prependIp {
+				req.Header.Set(g.destinationHeader, val + "," + req.Header.Get(g.destinationHeader))
+			} else {
+				req.Header.Set(g.destinationHeader, val)
 			}
-		}
-		// 获取到后直接设定 realIP
-		if realIP != "" {
-			if proxy.OverwriteXFF {
-				fmt.Println("🐸 Modify XFF to:", realIP)
-				req.Header.Set(xForwardedFor, realIP)
-			}
-			req.Header.Set(xRealIP, realIP)
-			break
+			g.next.ServeHTTP(rw, req)
+			return
 		}
 	}
 	g.next.ServeHTTP(rw, req)
-}
-
-// 排除非IP
-func (g *GetRealIP) excludedIP(s string) bool {
-	ip := net.ParseIP(s)
-	return ip == nil
+	return
 }

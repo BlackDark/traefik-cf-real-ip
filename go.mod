@@ -1,3 +1,3 @@
-module github.com/Paxxs/traefik-get-real-ip
+module github.com/BlackDark/traefik-cf-real-ip
 
-go 1.13
+go 1.18
